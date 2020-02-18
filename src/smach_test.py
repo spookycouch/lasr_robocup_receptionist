@@ -7,6 +7,7 @@ from collections import defaultdict
 from operator import itemgetter
 
 from euclidian_tracking import vector_euclidian_distance, EuclidianTracker
+from math import sqrt
 
 import numpy as np
 from sensor_msgs.msg import Image
@@ -51,12 +52,18 @@ COLOURS = {
 def cosine_similarity(a,b):
     return np.dot(a,b) / np.linalg.norm(a) * np.linalg.norm(b)
 
+def colour_euclidian_distance(a,b):
+    r = 3 * pow(a[2] - b[2],2)
+    g = 4 * pow(a[1] - b[1],2)
+    b = 2 * pow(a[0] - b[0],2)
+    return sqrt(r + g + b)
+
 # get closest colour based on euclidian distance
 def closest_colour(colour):
     min_key = 'black'
     min_dist = vector_euclidian_distance(colour,COLOURS['black'])
     for key in COLOURS:
-        curr_dist = vector_euclidian_distance(colour,COLOURS[key])
+        curr_dist = colour_euclidian_distance(colour,COLOURS[key])
         if curr_dist < min_dist:
             min_dist = curr_dist
             min_key = key
