@@ -3,6 +3,7 @@
 import smach
 import rospy
 import cv2
+import os
 from collections import defaultdict
 from operator import itemgetter
 
@@ -28,24 +29,8 @@ class Person:
 
 
 face_vectors = []
-COLOURS = {
-          'black'       : (0,0,0)       ,\
-          'white'       : (255,255,255) ,\
-          'red'         : (255,0,0)     ,\
-          'light green' : (0,255,0)     ,\
-          'blue'        : (0,0,255)     ,\
-          'yellow'      : (255,255,0)   ,\
-          'cyan'        : (0,255,255)   ,\
-          'magenta'     : (255,0,255)   ,\
-          'light grey'  : (192,192,192) ,\
-          'grey'        : (128,128,128) ,\
-          'maroon'      : (128,0,0)     ,\
-          'olive'       : (128,128,0)   ,\
-          'green'       : (0,128,0)     ,\
-          'purple'      : (128,0,128)   ,\
-          'teal'        : (0,128,128)   ,\
-          'navy'        : (0,0,128)      \
-          }
+LAB_COLOUR_MAP = np.load(os.path.dirname(os.path.realpath(__file__)) + '/lab_colour_map.npy')
+LAB_COLOURS = ['white', 'yellow', 'orange', 'red', 'purple', 'blue', 'green']
 
 
 # cosine similarity to measure distance between faces
@@ -53,21 +38,18 @@ def cosine_similarity(a,b):
     return np.dot(a,b) / np.linalg.norm(a) * np.linalg.norm(b)
 
 def colour_euclidian_distance(a,b):
-    r = 3 * pow(a[2] - b[2],2)
-    g = 4 * pow(a[1] - b[1],2)
-    b = 2 * pow(a[0] - b[0],2)
-    return sqrt(r + g + b)
+    sum = 0
+    for i in range(len(a)):
+        sum += pow(a[i] - b[i],2)
+    return sqrt(sum)
 
 # get closest colour based on euclidian distance
 def closest_colour(colour):
-    min_key = 'black'
-    min_dist = vector_euclidian_distance(colour,COLOURS['black'])
-    for key in COLOURS:
-        curr_dist = colour_euclidian_distance(colour,COLOURS[key])
-        if curr_dist < min_dist:
-            min_dist = curr_dist
-            min_key = key
-    return min_key
+    a = int(colour[0] + 128)/16
+    b = int(colour[1] + 128)/16
+    index = LAB_COLOUR_MAP[a,b]
+    print a,b, index
+    return LAB_COLOURS[index]
 
 def dict_most_common():
     pass
@@ -184,10 +166,11 @@ class Detecting(smach.State):
                     body_box = (body_x1,body_y1,body_x2,body_y2)
                     # get all pixels of top
                     body_colours = frame[body_box[1] : body_box[3], body_box[0] : body_box[2]]
-                    body_colours = np.float32(body_colours.reshape(body_colours.size/3, 3))
+                    body_colours = cv2.cvtColor(body_colours, cv2.COLOR_BGR2LAB)
                     # k-means clustering
                     no_clusters = 3
-                    if body_colours.size >= no_clusters:
+                    if body_colours is not None and body_colours.size >= no_clusters:
+                        body_colours = np.float32(body_colours.reshape(body_colours.size/3, 3))
                         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.1) # used to be 200, 0.5
                         flags = cv2.KMEANS_RANDOM_CENTERS
                         compactness, labels, centres = cv2.kmeans(body_colours,no_clusters,None,criteria,10,flags)
@@ -195,26 +178,33 @@ class Detecting(smach.State):
                         count = defaultdict(int)
                         max_key = 0
                         max_count = 0
-                        # TODO: create sorted list instead of dict
                         for label in labels:
                             count[label[0]] += 1
                         for key in count:
                             if count[key] > max_count:
                                 max_count = count[key]
                                 max_key = key
-                        # get dominant colour in BGR, use RGB for colour name
+                        # get dominant colour in LAB for colour name
                         dominant_colour = [int(i) for i in centres[max_key]]
-                        colour_name = closest_colour(dominant_colour[::-1])
+                        l,a,b = dominant_colour
+                        l = l * 100/255
+                        a = a - 128
+                        b = b - 128
+                        colour_name = closest_colour((a,b))
+
+                        # pallette
+                        centres_bgr = cv2.cvtColor(np.uint8([centres]), cv2.COLOR_LAB2BGR)[0]
+                        colours_bgr = []
+                        for i in range(len(centres_bgr)):
+                            start_i = i * 40
+                            colour = [int(i) for i in centres_bgr[i]]
+                            colours_bgr.append(colour)
+                            cv2.rectangle(frame_bb, (start_i, frame_height - 40), (start_i + 40, frame_height), colour, -1)
 
                         # output
                         cv2.putText(frame_bb, 'top colour: {}'.format(colour_name), (body_box[0], body_box[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
-                        cv2.rectangle(frame_bb, (body_box[0], body_box[1]), (body_box[2], body_box[3]), dominant_colour, -1)
+                        cv2.rectangle(frame_bb, (body_box[0], body_box[1]), (body_box[2], body_box[3]), colours_bgr[max_key], -1)
                         cv2.rectangle(frame_bb, (body_box[0], body_box[1]), (body_box[2], body_box[3]), (0,0,255), 1)
-                        # palette
-                        for i in range(len(centres)):
-                            colour = [int(j) for j in centres[i]]
-                            start_i = i * 40
-                            cv2.rectangle(frame_bb, (start_i, frame_height - 40), (start_i + 40, frame_height), colour, -1)
 
 
 
@@ -236,11 +226,13 @@ class Detecting(smach.State):
                     hair_colours = hair_colours_t.reshape(hair_colours_t.size/3, 3)
                     hair_colours = np.concatenate((hair_colours, hair_colours_l.reshape(hair_colours_l.size/3, 3)))
                     hair_colours = np.concatenate((hair_colours, hair_colours_r.reshape(hair_colours_r.size/3, 3)))
-                    hair_colours = np.float32(hair_colours)
+                    hair_colours = hair_colours.reshape(1, hair_colours.size/3, 3)
+                    hair_colours = cv2.cvtColor(hair_colours, cv2.COLOR_BGR2LAB)
 
                     # k-means clustering
-                    no_clusters = 3
-                    if hair_colours.size >= no_clusters:
+                    no_clusters = 4
+                    if hair_colours is not None and hair_colours.size >= no_clusters:
+                        hair_colours = np.float32(hair_colours).reshape(hair_colours.size/3, 3)
                         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.1)
                         flags = cv2.KMEANS_RANDOM_CENTERS
                         compactness, labels, centres = cv2.kmeans(hair_colours,no_clusters,None,criteria,10,flags)
@@ -256,21 +248,29 @@ class Detecting(smach.State):
                                 max_key = key
                         # get dominant colour in BGR, use RGB for colour name
                         dominant_colour = [int(i) for i in centres[max_key]]
-                        colour_name = closest_colour(dominant_colour[::-1])
+                        l,a,b = dominant_colour
+                        l = l * 100/255
+                        a = a - 128
+                        b = b - 128
+                        colour_name = closest_colour((a,b))
+
+                        # pallette
+                        centres_bgr = cv2.cvtColor(np.uint8([centres]), cv2.COLOR_LAB2BGR)[0]
+                        colours_bgr = []
+                        for i in range(len(centres_bgr)):
+                            start_i = i * 40
+                            colour = [int(i) for i in centres_bgr[i]]
+                            colours_bgr.append(colour)
+                            cv2.rectangle(frame_bb, (start_i, frame_height - 80), (start_i + 40, frame_height - 40), colour, -1)
 
                         # draw helmet
                         cv2.putText(frame_bb, 'hair colour: {}'.format(colour_name), (box[0], box[1] - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
-                        cv2.rectangle(frame_bb, (box[0], hair_y1), (box[2], hair_y1 + hair_h_fifth), dominant_colour, -1)
-                        cv2.rectangle(frame_bb, (hair_x1, box[1]), (hair_x1 + hair_w_fifth, hair_y2), dominant_colour, -1)
-                        cv2.rectangle(frame_bb, (hair_x2 - hair_w_fifth, box[1]), (hair_x2, hair_y2), dominant_colour, -1)
+                        cv2.rectangle(frame_bb, (box[0], hair_y1), (box[2], hair_y1 + hair_h_fifth), colours_bgr[max_key], -1)
+                        cv2.rectangle(frame_bb, (hair_x1, box[1]), (hair_x1 + hair_w_fifth, hair_y2), colours_bgr[max_key], -1)
+                        cv2.rectangle(frame_bb, (hair_x2 - hair_w_fifth, box[1]), (hair_x2, hair_y2), colours_bgr[max_key], -1)
                         cv2.rectangle(frame_bb, (box[0], hair_y1), (box[2], hair_y1 + hair_h_fifth), (0,0,255), 1)
                         cv2.rectangle(frame_bb, (hair_x1, box[1]), (hair_x1 + hair_w_fifth, hair_y2), (0,0,255), 1)
                         cv2.rectangle(frame_bb, (hair_x2 - hair_w_fifth, box[1]), (hair_x2, hair_y2), (0,0,255), 1)
-                        # draw palette
-                        for i in range(len(centres)):
-                            colour = [int(j) for j in centres[i]]
-                            start_i = i * 40
-                            cv2.rectangle(frame_bb, (start_i, frame_height - 80), (start_i + 40, frame_height - 40), colour, -1)
                         
 
 
@@ -326,8 +326,8 @@ def main():
     sm = smach.StateMachine(outcomes=['outcome2'])
 
     with sm:
-        smach.StateMachine.add('INIT', Init(), transitions={'outcome1':'WAITING'})
-        # smach.StateMachine.add('INIT', Init(), transitions={'outcome1':'DETECTING'})
+        # smach.StateMachine.add('INIT', Init(), transitions={'outcome1':'WAITING'})
+        smach.StateMachine.add('INIT', Init(), transitions={'outcome1':'DETECTING'})
         smach.StateMachine.add('WAITING', Waiting(), transitions={'outcome1':'DETECTING'})
         smach.StateMachine.add('DETECTING', Detecting(), transitions={'outcome1':'outcome2'})
     
