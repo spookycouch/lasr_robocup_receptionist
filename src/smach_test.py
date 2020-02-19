@@ -30,7 +30,7 @@ class Person:
 
 face_vectors = []
 LAB_COLOUR_MAP = np.load(os.path.dirname(os.path.realpath(__file__)) + '/lab_colour_map.npy')
-LAB_COLOURS = ['white', 'yellow', 'orange', 'red', 'purple', 'blue', 'green']
+LAB_COLOURS = ['yellow', 'orange', 'red', 'magenta', 'navy', 'blue', 'teal', 'green', 'lime green']
 
 
 # cosine similarity to measure distance between faces
@@ -45,14 +45,37 @@ def colour_euclidian_distance(a,b):
 
 # get closest colour based on euclidian distance
 def closest_colour(colour):
-    a = int(colour[0] + 128)/16
-    b = int(colour[1] + 128)/16
+    l = colour[0]
+    a = int((colour[1] + 128)/2)
+    b = int((colour[2] + 128)/2)
     index = LAB_COLOUR_MAP[a,b]
-    print a,b, index
-    return LAB_COLOURS[index]
 
-def dict_most_common():
-    pass
+    prefix = ''
+
+    if l > 80:
+        colour_name = 'white'
+    elif l < 20:
+        colour_name = 'black'
+    else:
+        if l < 40:
+            prefix = 'dark '
+        elif l > 60:
+            prefix = 'light '
+        if pow(a,2) + pow(b,2) < pow(90,2):
+            colour_name = 'grey'
+        else:
+            colour_name = LAB_COLOURS[index]
+
+    return prefix +  colour_name
+
+def dict_most_common(count):
+    max_key = -1
+    max_count = 0
+    for key in count:
+        if count[key] > max_count:
+            max_count = count[key]
+            max_key = key
+    return max_key
 
 # create all of the clients
 class Init(smach.State):
@@ -142,8 +165,17 @@ class Detecting(smach.State):
         get_age_and_gender = rospy.ServiceProxy('face_age_and_gender', GetAgeAndGender)
         bridge = CvBridge()
 
-        while True:
+        face_vector_list = []
+        face_dict = defaultdict(int)
+        top_colour_dict = defaultdict(int)
+        hair_colour_dict = defaultdict(int)
+        age_dict = defaultdict(int)
+        gender_dict = defaultdict(int)
+
+        for iteration in range(10):
             img_msg = rospy.wait_for_message('/xtion/rgb/image_raw',Image)
+            top_colour = None
+            hair_colour = None
             try:
                 faces = get_faces(img_msg,0.5)
                 frame = bridge.imgmsg_to_cv2(img_msg, "bgr8")
@@ -190,7 +222,7 @@ class Detecting(smach.State):
                         l = l * 100/255
                         a = a - 128
                         b = b - 128
-                        colour_name = closest_colour((a,b))
+                        top_colour = closest_colour((l,a,b))
 
                         # pallette
                         centres_bgr = cv2.cvtColor(np.uint8([centres]), cv2.COLOR_LAB2BGR)[0]
@@ -202,7 +234,7 @@ class Detecting(smach.State):
                             cv2.rectangle(frame_bb, (start_i, frame_height - 40), (start_i + 40, frame_height), colour, -1)
 
                         # output
-                        cv2.putText(frame_bb, 'top colour: {}'.format(colour_name), (body_box[0], body_box[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
+                        cv2.putText(frame_bb, 'top colour: {}'.format(top_colour), (body_box[0], body_box[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
                         cv2.rectangle(frame_bb, (body_box[0], body_box[1]), (body_box[2], body_box[3]), colours_bgr[max_key], -1)
                         cv2.rectangle(frame_bb, (body_box[0], body_box[1]), (body_box[2], body_box[3]), (0,0,255), 1)
 
@@ -230,7 +262,7 @@ class Detecting(smach.State):
                     hair_colours = cv2.cvtColor(hair_colours, cv2.COLOR_BGR2LAB)
 
                     # k-means clustering
-                    no_clusters = 4
+                    no_clusters = 3
                     if hair_colours is not None and hair_colours.size >= no_clusters:
                         hair_colours = np.float32(hair_colours).reshape(hair_colours.size/3, 3)
                         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.1)
@@ -252,7 +284,7 @@ class Detecting(smach.State):
                         l = l * 100/255
                         a = a - 128
                         b = b - 128
-                        colour_name = closest_colour((a,b))
+                        hair_colour = closest_colour((l,a,b))
 
                         # pallette
                         centres_bgr = cv2.cvtColor(np.uint8([centres]), cv2.COLOR_LAB2BGR)[0]
@@ -264,7 +296,7 @@ class Detecting(smach.State):
                             cv2.rectangle(frame_bb, (start_i, frame_height - 80), (start_i + 40, frame_height - 40), colour, -1)
 
                         # draw helmet
-                        cv2.putText(frame_bb, 'hair colour: {}'.format(colour_name), (box[0], box[1] - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
+                        cv2.putText(frame_bb, 'hair colour: {}'.format(hair_colour), (box[0], box[1] - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
                         cv2.rectangle(frame_bb, (box[0], hair_y1), (box[2], hair_y1 + hair_h_fifth), colours_bgr[max_key], -1)
                         cv2.rectangle(frame_bb, (hair_x1, box[1]), (hair_x1 + hair_w_fifth, hair_y2), colours_bgr[max_key], -1)
                         cv2.rectangle(frame_bb, (hair_x2 - hair_w_fifth, box[1]), (hair_x2, hair_y2), colours_bgr[max_key], -1)
@@ -276,19 +308,26 @@ class Detecting(smach.State):
 
                     # AGE AND GENDER
                     # self-explanatory
+                    face_x1 = max(0, int(box[0] - box_w/3))
+                    face_y1 = max(0, int(box[1] - box_h/3))
+                    face_x2 = min(frame_width, int(box[2] + box_w/3))
+                    face_y2 = min(frame_height, int(box[3] + box_h/3))
+                    face_box = (face_x1, face_y1, face_x2, face_y2)
                     age_and_gender = get_age_and_gender(img_msg, box)
                     age = age_and_gender.age
                     gender = age_and_gender.gender
                     cv2.putText(frame_bb, 'age: {}, gender: {}'.format(age,gender), (box[0], box[1] - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+                    cv2.rectangle(frame_bb, (face_x1, face_y1), (face_x2, face_y2), (0,0,255), 1)
 
 
 
                     # FACE RECOGNITION
                     embeddings = get_embeddings(img_msg, box).embeddings
+                    face_vector_list.append(embeddings)
                     match = False
                     # add new face if none
-                    if len(face_vectors) == 0:
-                        face_vectors.append(embeddings)                    
+                    # if len(face_vectors) == 0:
+                    #     face_vectors.append(embeddings)
                     # get max similarity
                     max_sim = -1
                     max_i = 0
@@ -298,22 +337,46 @@ class Detecting(smach.State):
                             max_sim = sim
                             max_i = i
                     # output if sufficient max similarity
-                    if max_sim > 0.5:
+                    if max_sim > 0.75:
+                        face_dict[max_i] += 1
                         cv2.putText(frame_bb, 'match: {}, {:.3f}'.format('person ' + str(max_i),max_sim), (box[0], box[1] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
-                    else:
-                        face_vectors.append(embeddings)
 
+
+                # append to lists
+                if top_colour is not None:
+                    top_colour_dict[top_colour] += 1
+                if hair_colour is not None:
+                    hair_colour_dict[hair_colour] += 1
+                age_dict[age] += 1
+                gender_dict[gender] += 1
 
                 # display test
                 cv2.imshow('cosine_sim',frame_bb)
                 cv2.waitKey(1)
 
-
-
             except rospy.ServiceException as e:
                 rospy.logerr(e)
             except CvBridgeError as e:
                 rospy.logerr(e)
+        
+        matched_face_index = dict_most_common(face_dict)
+        print matched_face_index
+        if face_dict[matched_face_index] >= 3:
+            matched_face = matched_face_index
+        else:
+            face_vectors.append(face_vector_list[0])
+            matched_face = len(face_vectors) - 1
+
+        print 'PERSON ESTIMATED:\n\
+                top colour:  {}\n\
+                hair colour: {}\n\
+                age        : {}\n\
+                gender     : {}\n\
+                person     : {}'.format(dict_most_common(top_colour_dict),\
+                                        dict_most_common(hair_colour_dict),\
+                                        dict_most_common(age_dict),\
+                                        dict_most_common(gender_dict),\
+                                        matched_face)
 
         print 'waiting for human'
         return 'outcome1'
@@ -329,7 +392,7 @@ def main():
         # smach.StateMachine.add('INIT', Init(), transitions={'outcome1':'WAITING'})
         smach.StateMachine.add('INIT', Init(), transitions={'outcome1':'DETECTING'})
         smach.StateMachine.add('WAITING', Waiting(), transitions={'outcome1':'DETECTING'})
-        smach.StateMachine.add('DETECTING', Detecting(), transitions={'outcome1':'outcome2'})
+        smach.StateMachine.add('DETECTING', Detecting(), transitions={'outcome1':'WAITING'})
     
     outcome = sm.execute()
 

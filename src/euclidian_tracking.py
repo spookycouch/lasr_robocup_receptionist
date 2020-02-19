@@ -45,14 +45,12 @@ class EuclidianTracker():
 
                     # set weight = 0 if box is more than one box away (discard)
                     box_dist = vector_euclidian_distance((tracked_box[0],tracked_box[1]), (tracked_box[2],tracked_box[3]))
-                    print box_dist, euclid_dist
                     if euclid_dist > box_dist:
                         weight = 0
                     G.add_edge(('b', i), ('t', j), weight = weight)
             
             # max-match using Blossom algorithm
             max_match = nx.max_weight_matching(G)
-            print max_match
             for match in max_match:
                 if not G[('b', match[0][1])][('t',match[1][1])]['weight'] == 0:
                     self.tracked_objects[match[1][1]].box = boxes[match[0][1]]
