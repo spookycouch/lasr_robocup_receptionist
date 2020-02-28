@@ -57,10 +57,8 @@ class EuclidianTracker():
                     redetected_boxes[match[0][1]] = 1
                     redetected_objects[match[1][1]] = 1
 
-        # delete dropped objects        
-        for i in range(len(redetected_objects)):
-            if redetected_objects[i] == 0:
-                del self.tracked_objects[i]
+        # delete dropped objects
+        self.tracked_objects = [self.tracked_objects[i] for i in range(len(redetected_objects)) if redetected_objects[i]]
         
         # add new detections
         for i in range(len(redetected_boxes)):
