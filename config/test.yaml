@@ -1,0 +1,30 @@
+location:
+  position: 
+    x: 0.374610889606
+    y: 2.64225894581
+    z: 0.0
+  orientation: 
+    x: 0.0
+    y: 0.0
+    z: 0.618607683167
+    w: 0.785700028209
+
+chairs:
+  chair0:
+    status: 'Unknown'
+    box:
+      frame: 'map'
+      max_xy: [ -0.2, 7 ]
+      min_xy: [ -1, 6 ]
+  chair1:
+    status: 'Uknown'
+    box:
+      frame: 'map'
+      max_xy: [ 0.6, 7 ]
+      min_xy: [ -0.2, 6 ]
+  chair2:
+    status: 'Uknown'
+    box:
+      frame: 'map'
+      max_xy: [ 2, 5.6 ]
+      min_xy: [ 1, 4.9 ]
