@@ -3,73 +3,84 @@
 import smach
 import rospy
 import cv2
-import os
+import actionlib
+from cv_bridge import CvBridge, CvBridgeError
 from collections import defaultdict
 from operator import itemgetter
 
 from euclidian_tracking import vector_euclidian_distance, EuclidianTracker
-from math import sqrt
+from colours import k_means_colour
 
 import numpy as np
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, PointCloud2
+from pal_interaction_msgs.msg import TtsAction, TtsGoal
+from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
+from std_msgs.msg import Header
+from geometry_msgs.msg import Point, Pose, Quaternion, PointStamped
+from lasr_object_detection_yolo.srv import YoloDetection
 from robocup_face_recognition.srv import FaceDetection, GetEmbeddings, GetAgeAndGender
+import tf
 
 
-from cv_bridge import CvBridge, CvBridgeError
+
+class GlobalState:
+    def __init__(self):
+        self.persons = []
+        self.NAMES_M = ['bobbert','michael','steve']
+        self.NAMES_F = ['sally','christine','jenny']
+        self.tracker = EuclidianTracker()
+        self.tracked_id = 0
+        self.next_person_id = 0
+        self.curr_person_id = None
+
 
 
 class Person:
-    def __init__(self, face, name, top_colour, hair_colour, age, gender):
+    def __init__(self, id, face, name, top_colour, hair_colour, age, gender):
+        self.id = id
         self.face = face
         self.name = name
         self.top_colour = top_colour
         self.hair_colour = hair_colour
         self.age = age
         self.gender = gender
+    
+    def __str__(self):
+        return 'PERSON {}: \
+            \n\tname       : {}\
+            \n\ttop colour : {}\
+            \n\thair colour: {}\
+            \n\tage        : {}\
+            \n\tgender     : {}'.format(self.id,        \
+                                    self.name,          \
+                                    self.top_colour,    \
+                                    self.hair_colour,   \
+                                    self.age,           \
+                                    self.gender)
 
 
-tracker = EuclidianTracker()
-id_focus = 0
-face_vectors = []
-LAB_COLOUR_MAP = np.load(os.path.dirname(os.path.realpath(__file__)) + '/lab_colour_map.npy')
-LAB_COLOURS = ['yellow', 'orange', 'red', 'magenta', 'navy', 'blue', 'teal', 'green', 'lime green', 'grey']
+
+world = GlobalState()
+
+
+
+def talk(text):
+    # Create the TTS goal and send it
+    speech_client = actionlib.SimpleActionClient('/tts', TtsAction)
+    print('\033[1;36mTIAGO: ' + text + '\033[0m')
+    tts_goal = TtsGoal()
+    tts_goal.rawtext.lang_id = 'en_GB'
+    tts_goal.rawtext.text = text
+    rospy.sleep(0.3) # prevent race conditions
+    speech_client.send_goal(tts_goal)
+
 
 
 # cosine similarity to measure distance between faces
 def cosine_similarity(a,b):
     return np.dot(a,b) / np.linalg.norm(a) * np.linalg.norm(b)
-
-def colour_euclidian_distance(a,b):
-    sum = 0
-    for i in range(len(a)):
-        sum += pow(a[i] - b[i],2)
-    return sqrt(sum)
-
-# get closest colour based on euclidian distance
-def closest_colour(colour):
-    l,a,b = cv2.cvtColor(np.array([[colour]], np.uint8), cv2.COLOR_BGR2LAB)[0][0]
-    l = l * 100/255
-    a = int(a/2)
-    b = 127 - int(b/2)
-
-    index = LAB_COLOUR_MAP[b,a]
-
-    prefix = ''
-    colour_name = LAB_COLOURS[index]
-
-    if l < 40:
-        prefix = 'dark '
-    elif l > 60:
-        prefix = 'light '
-
-    if colour_name == 'grey':
-        if l > 85:
-            return 'white'
-        elif l < 25:
-            return 'black'
-
-    return prefix +  colour_name
     
+
 
 def dict_most_common(count):
     max_key = -1
@@ -80,6 +91,28 @@ def dict_most_common(count):
             max_key = key
     return max_key
 
+
+
+def update_tracker_faces_and_depth(faces, depth_msg):
+    depth_frame = np.fromstring(depth_msg.data).view(dtype=np.float32).reshape(depth_msg.height, depth_msg.width)
+    close_detections = []
+
+    # mark faces within 1.5m as close
+    for detection in faces.detections:
+        box = detection.box
+        face_depth = np.array(depth_frame[box[1] : box[3], box[0] : box[2]])
+        face_depth = face_depth[np.isfinite(face_depth)]
+        median = np.median(face_depth)
+        if median <= 2:
+            close_detections.append(detection)
+        # close_detections.append(detection)
+    
+    # update tracker for all close objects
+    boxes = [detection.box for detection in close_detections]
+    world.tracker.update(boxes)
+
+
+
 # create all of the clients
 class Init(smach.State):
     def __init__(self):
@@ -87,6 +120,7 @@ class Init(smach.State):
 
     def execute(self, userdata):
         return 'outcome1'
+
 
 
 # wait for someone to be in view for 10 seconds
@@ -97,11 +131,10 @@ class Waiting(smach.State):
     def execute(self, userdata):
         rospy.wait_for_service('face_detection')
         get_faces = rospy.ServiceProxy('face_detection', FaceDetection)
-
         bridge = CvBridge()
 
         # reset time
-        for detection in tracker.tracked_objects:
+        for detection in world.tracker.tracked_objects:
             detection.time = rospy.Time.now()
         
         while True:
@@ -110,26 +143,11 @@ class Waiting(smach.State):
             
             try:
                 faces = get_faces(img_msg,0.5)
+                update_tracker_faces_and_depth(faces, depth_msg)
                 frame = bridge.imgmsg_to_cv2(img_msg, "bgr8")
-                frame_height, frame_width = frame.shape[:2]
-
-                depth_frame = np.fromstring(depth_msg.data).view(dtype=np.float32).reshape(frame_height, frame_width)
-                close_detections = []
-
-                # mark faces within 1.5m as close
-                for detection in faces.detections:
-                    box = detection.box
-                    face_depth = np.array(depth_frame[box[1] : box[3], box[0] : box[2]])
-                    median = np.median(face_depth)
-                    if median <= 1.5:
-                        close_detections.append(detection)
-                
-                # update tracker for all close objects
-                boxes = [detection.box for detection in close_detections]
-                tracker.update(boxes)
 
                 # output
-                for tracked_object in tracker.tracked_objects:
+                for tracked_object in world.tracker.tracked_objects:
                     box = tracked_object.box
                     cv2.putText(frame, 'id: {}'.format(tracked_object.id), (box[0], box[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
                     cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), (0,255,0), 2)
@@ -145,31 +163,26 @@ class Waiting(smach.State):
             # if a tracked person has been around for 10 seconds, transition
             max_time = 0
             max_id = 0
-            global id_focus
-            for tracked_object in tracker.tracked_objects:
+            for tracked_object in world.tracker.tracked_objects:
                 time_elapsed = rospy.Time.now().secs - tracked_object.time.secs
                 if time_elapsed > max_time:
                     max_time = time_elapsed
                     max_id = tracked_object.id
             
-            print max_time, 'id', max_id
+            print 'tracking {}: {} seconds'.format(max_id, max_time)
 
-            if max_time >= 7:
-                id_focus = max_id
-                print id_focus
+            if max_time >= 4:
+                world.tracked_id = max_id
                 return 'outcome1'
 
 
-# TODO: SELECT LARGEST & CENTREMOST FACE BOX
-# TODO: (scale size by distance from centre to get this)
-# TODO: perhaps look at the tracked person first as well
-#
 # identify features of said someone
 class Detecting(smach.State):
     def __init__(self):
-        smach.State.__init__(self,outcomes=['outcome1'])
+        smach.State.__init__(self,outcomes=['outcome1','wait_leave'])
 
     def execute(self, userdata):
+        talk('Hi there, may I please look into your eyes?')
         rospy.wait_for_service('face_detection')
         rospy.wait_for_service('face_embedding')
         rospy.wait_for_service('face_age_and_gender')
@@ -196,34 +209,19 @@ class Detecting(smach.State):
                 frame_bb = bridge.imgmsg_to_cv2(faces.image_bb, "bgr8")
                 frame_height, frame_width = frame.shape[:2]
 
-                depth_frame = np.fromstring(depth_msg.data).view(dtype=np.float32).reshape(frame_height, frame_width)
-                close_detections = []
+                update_tracker_faces_and_depth(faces, depth_msg)
 
-                # mark faces within 1.5m as close
-                for detection in faces.detections:
-                    box = detection.box
-                    face_depth = np.array(depth_frame[box[1] : box[3], box[0] : box[2]])
-                    median = np.median(face_depth)
-                    if median <= 1.5:
-                        close_detections.append(detection)
-                
-                # update tracker for all close objects
-                boxes = [detection.box for detection in close_detections]
-                tracker.update(boxes)
-
+                # if the tracked face is no longer present, return to wait
                 detection_focus = None
-                print id_focus
-                for detection in tracker.tracked_objects:
-                    if detection.id == id_focus:
+                for detection in world.tracker.tracked_objects:
+                    if detection.id == world.tracked_id:
                         detection_focus = detection
-
                 if detection_focus is None:
                     return 'outcome1'
 
                 box = detection_focus.box
                 box_w = box[2] - box[0]
                 box_h = box[3] - box[1]
-
 
 
                 # COLOUR OF TOP
@@ -235,27 +233,11 @@ class Detecting(smach.State):
                 body_box = (body_x1,body_y1,body_x2,body_y2)
                 # get all pixels of top
                 body_colours = frame[body_box[1] : body_box[3], body_box[0] : body_box[2]]
-                # k-means clustering
-                no_clusters = 3
-                if body_colours.size >= no_clusters:
-                    body_colours = np.float32(body_colours.reshape(body_colours.size/3, 3))
-                    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.1) # used to be 200, 0.5
-                    flags = cv2.KMEANS_RANDOM_CENTERS
-                    compactness, labels, centres = cv2.kmeans(body_colours,no_clusters,None,criteria,10,flags)
-                    # count max occurrences
-                    count = defaultdict(int)
-                    max_key = 0
-                    max_count = 0
-                    for label in labels:
-                        count[label[0]] += 1
-                    for key in count:
-                        if count[key] > max_count:
-                            max_count = count[key]
-                            max_key = key
-                    # get dominant colour in LAB for colour name
-                    dominant_colour = [int(i) for i in centres[max_key]]
-                    top_colour = closest_colour(dominant_colour)
+                body_colours = np.float32(body_colours.reshape(body_colours.size/3, 3))
+                # get dominant colour in LAB for colour name
+                dominant_colour, top_colour, centres = k_means_colour(3, body_colours)
 
+                if dominant_colour is not None:
                     # pallette
                     colours_bgr = []
                     for i in range(len(centres)):
@@ -266,7 +248,7 @@ class Detecting(smach.State):
 
                     # output
                     cv2.putText(frame_bb, 'top colour: {}'.format(top_colour), (body_box[0], body_box[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
-                    cv2.rectangle(frame_bb, (body_box[0], body_box[1]), (body_box[2], body_box[3]), colours_bgr[max_key], -1)
+                    cv2.rectangle(frame_bb, (body_box[0], body_box[1]), (body_box[2], body_box[3]), dominant_colour, -1)
                     cv2.rectangle(frame_bb, (body_box[0], body_box[1]), (body_box[2], body_box[3]), (0,0,255), 1)
 
 
@@ -290,27 +272,13 @@ class Detecting(smach.State):
                 hair_colours = np.concatenate((hair_colours, hair_colours_l.reshape(hair_colours_l.size/3, 3)))
                 hair_colours = np.concatenate((hair_colours, hair_colours_r.reshape(hair_colours_r.size/3, 3)))
                 hair_colours = hair_colours.reshape(1, hair_colours.size/3, 3)
+                hair_colours = np.float32(hair_colours).reshape(hair_colours.size/3, 3)
+
 
                 # k-means clustering
-                no_clusters = 3
-                if hair_colours.size >= no_clusters:
-                    hair_colours = np.float32(hair_colours).reshape(hair_colours.size/3, 3)
-                    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.1)
-                    flags = cv2.KMEANS_RANDOM_CENTERS
-                    compactness, labels, centres = cv2.kmeans(hair_colours,no_clusters,None,criteria,10,flags)
-                    # count max occurrences
-                    count = defaultdict(int)
-                    max_key = 0
-                    max_count = 0
-                    for label in labels:
-                        count[label[0]] += 1
-                    for key in count:
-                        if count[key] > max_count:
-                            max_count = count[key]
-                            max_key = key
-                    # get dominant colour in BGR, use RGB for colour name
-                    dominant_colour = [int(i) for i in centres[max_key]]
-                    hair_colour = closest_colour(dominant_colour)
+                dominant_colour, hair_colour,centres = k_means_colour(3,hair_colours)
+            
+                if dominant_colour is not None:
 
                     # pallette
                     colours_bgr = []
@@ -322,14 +290,13 @@ class Detecting(smach.State):
 
                     # draw helmet
                     cv2.putText(frame_bb, 'hair colour: {}'.format(hair_colour), (box[0], box[1] - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
-                    cv2.rectangle(frame_bb, (box[0], hair_y1), (box[2], hair_y1 + hair_h_fifth), colours_bgr[max_key], -1)
-                    cv2.rectangle(frame_bb, (hair_x1, box[1]), (hair_x1 + hair_w_fifth, hair_y2), colours_bgr[max_key], -1)
-                    cv2.rectangle(frame_bb, (hair_x2 - hair_w_fifth, box[1]), (hair_x2, hair_y2), colours_bgr[max_key], -1)
+                    cv2.rectangle(frame_bb, (box[0], hair_y1), (box[2], hair_y1 + hair_h_fifth), dominant_colour, -1)
+                    cv2.rectangle(frame_bb, (hair_x1, box[1]), (hair_x1 + hair_w_fifth, hair_y2), dominant_colour, -1)
+                    cv2.rectangle(frame_bb, (hair_x2 - hair_w_fifth, box[1]), (hair_x2, hair_y2), dominant_colour, -1)
                     cv2.rectangle(frame_bb, (box[0], hair_y1), (box[2], hair_y1 + hair_h_fifth), (0,0,255), 1)
                     cv2.rectangle(frame_bb, (hair_x1, box[1]), (hair_x1 + hair_w_fifth, hair_y2), (0,0,255), 1)
                     cv2.rectangle(frame_bb, (hair_x2 - hair_w_fifth, box[1]), (hair_x2, hair_y2), (0,0,255), 1)
                     
-
 
                 # AGE AND GENDER
                 # self-explanatory
@@ -350,22 +317,18 @@ class Detecting(smach.State):
                 embeddings = get_embeddings(img_msg, box).embeddings
                 face_vector_list.append(embeddings)
                 match = False
-                # add new face if none
-                # if len(face_vectors) == 0:
-                #     face_vectors.append(embeddings)
                 # get max similarity
                 max_sim = -1
-                max_i = 0
-                for i in range(len(face_vectors)):
-                    sim = cosine_similarity(face_vectors[i], embeddings)
+                max_id = None
+                for person in world.persons:
+                    sim = cosine_similarity(person.face, embeddings)
                     if sim > max_sim:
                         max_sim = sim
-                        max_i = i
+                        max_id = person.id
                 # output if sufficient max similarity
-                if max_sim > 0.5:
-                    cv2.putText(frame_bb, 'match: {}, {:.3f}'.format('person ' + str(max_i),max_sim), (box[0], box[1] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
-                if max_sim > 0.85:
-                    face_dict[max_i] += 1
+                cv2.putText(frame_bb, 'match: {}, {:.3f}'.format('person ' + str(max_id),max_sim), (box[0], box[1] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+                if max_sim > 0.7:
+                    face_dict[max_id] += 1
 
 
                 # append to lists
@@ -377,6 +340,7 @@ class Detecting(smach.State):
                 gender_dict[gender] += 1
 
                 # display test
+                print 'tracking {}: {:.2f} match person {}'.format(world.tracked_id, max_sim, max_id)
                 cv2.imshow('cosine_sim',frame_bb)
                 cv2.waitKey(1)
 
@@ -385,10 +349,20 @@ class Detecting(smach.State):
             except CvBridgeError as e:
                 rospy.logerr(e)
         
+
+        name_out = np.random.choice(world.NAMES_M)
+        top_colour_out = dict_most_common(top_colour_dict)
+        hair_colour_out = dict_most_common(hair_colour_dict)
+        age_out = dict_most_common(age_dict)
+        gender_out = dict_most_common(gender_dict)
+
+        person = None
         matched_face_index = dict_most_common(face_dict)
-        print matched_face_index
-        if face_dict[matched_face_index] >= 3:
-            matched_face = matched_face_index
+        print face_dict, len(world.persons)
+
+        if face_dict[matched_face_index] >= 5:
+            person = world.persons[matched_face_index]
+            talk('Welcome back {}, I like your {} top!'.format(person.name, person.top_colour))
         else:
             # get closest to average face vector and append it
             average_face = np.average(face_vector_list,axis=0)
@@ -396,22 +370,191 @@ class Detecting(smach.State):
             for face_vector in face_vector_list:
                 face_dist_avg.append(vector_euclidian_distance(face_vector, average_face))
             face_index = np.argmin(face_dist_avg)
-            face_vectors.append(face_vector_list[face_index])
-            matched_face = len(face_vectors) - 1
 
-        print 'PERSON ESTIMATED:\n\
-                top colour:  {}\n\
-                hair colour: {}\n\
-                age        : {}\n\
-                gender     : {}\n\
-                person     : {}'.format(dict_most_common(top_colour_dict),\
-                                        dict_most_common(hair_colour_dict),\
-                                        dict_most_common(age_dict),\
-                                        dict_most_common(gender_dict),\
-                                        matched_face)
+            person = Person(world.next_person_id, face_vector_list[face_index], name_out, top_colour_out, hair_colour_out, age_out, gender_out)
+            world.persons.append(person)
+            world.next_person_id += 1
+            talk('It appears I haven\'t met you before, I shall call you {}'.format(person.name))
+        
+        world.curr_person_id = person.id
+        print person
+        return 'wait_leave'
 
-        print 'waiting for human'
+
+
+class WaitLeave(smach.State):
+    def __init__(self):
+        smach.State.__init__(self,outcomes=['outcome1'])
+
+    def execute(self, userdata):
+        rospy.wait_for_service('face_detection')
+        get_faces = rospy.ServiceProxy('face_detection', FaceDetection)
+        bridge = CvBridge()
+
+        start_time = rospy.Time.now()
+        spoken = False
+        
+        while True:
+            img_msg = rospy.wait_for_message('/xtion/rgb/image_raw',Image)
+            depth_msg = rospy.wait_for_message('/xtion/depth_registered/image_raw',Image)
+            
+            try:
+                faces = get_faces(img_msg,0.5)
+                update_tracker_faces_and_depth(faces, depth_msg)
+                frame = bridge.imgmsg_to_cv2(img_msg, "bgr8")
+
+                # output
+                for tracked_object in world.tracker.tracked_objects:
+                    box = tracked_object.box
+                    cv2.putText(frame, 'id: {}'.format(tracked_object.id), (box[0], box[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+                    cv2.rectangle(frame, (box[0], box[1]), (box[2], box[3]), (0,255,0), 2)
+                
+                cv2.imshow('cosine_sim',frame)
+                cv2.waitKey(1)
+            
+            except rospy.ServiceException as e:
+                rospy.logerr(e)
+            except CvBridgeError as e:
+                rospy.logerr(e)
+            
+            time_elapsed = None
+
+            for tracked_object in world.tracker.tracked_objects:
+                if tracked_object.id == world.tracked_id:
+                    time_elapsed = rospy.Time.now().secs - start_time.secs
+
+            if time_elapsed is not None:
+                if not spoken and time_elapsed > 10:
+                    talk('please begone {}, I would like to meet someone new'.format(world.persons[world.curr_person_id].name))
+                    spoken = True
+                print 'tracking {}: {} seconds'.format(world.tracked_id, time_elapsed)
+            else:
+                talk('goodbye {}'.format(world.persons[world.curr_person_id].name))
+                return 'outcome1'
+
+
+
+class InspectRoom(smach.State):
+    def __init__(self):
+        smach.State.__init__(self,outcomes=['outcome1'])
+
+    def execute(self, userdata):
+        move_base_client = actionlib.SimpleActionClient('/move_base', MoveBaseAction)
+        move_base_client.wait_for_server()
+
+        location = rospy.get_param('/location')
+
+        goal = MoveBaseGoal()
+        goal.target_pose.header = Header(frame_id="map", stamp=rospy.Time.now())
+        goal.target_pose.pose = Pose(position = Point(**location['position']),
+            orientation = Quaternion(**location['orientation']))
+        
+        rospy.loginfo('Sending goal location ...')
+        move_base_client.send_goal(goal) 
+        if move_base_client.wait_for_result():
+            rospy.loginfo('Goal location achieved!')
+        else:
+            rospy.logwarn("Couldn't reach the goal!")
+        
         return 'outcome1'
+
+
+
+class DetectPeople(smach.State):
+    def __init__(self):
+        smach.State.__init__(self,outcomes=['outcome1'])
+
+    def execute(self, userdata):
+        # wait for the service to come up
+        image_raw = rospy.wait_for_message('/xtion/rgb/image_raw', Image)
+        rospy.wait_for_service('/yolo_detection')
+        bridge = CvBridge()
+
+        # call the service
+        try:
+            detect_objects = rospy.ServiceProxy('/yolo_detection', YoloDetection)
+            detection_result = detect_objects(image_raw, 'coco', 0.5, 0.3)
+        except rospy.ServiceException as e:
+            print "Service call failed: %s"%e
+            return 'outcome1'
+        
+        person_coords = []
+
+
+
+        # -------------------------- #
+        # --- WAIT FOR TRANSFORM --- #
+        # -------------------------- #
+        transformer = tf.TransformListener()
+        rospy.sleep(2.0)
+
+        depth_points = rospy.wait_for_message('xtion/depth_registered/points', PointCloud2)
+        header = depth_points.header
+        height = depth_points.height
+        width = depth_points.width
+        cloud = np.fromstring(depth_points.data, np.float32)
+        cloud = cloud.reshape(height, width, 8)
+        transformer.waitForTransform('xtion_rgb_optical_frame', 'map', depth_points.header.stamp, rospy.Duration(2.0))
+
+        for person in detection_result.detected_objects:
+            if not person.name == 'person':
+                continue
+            
+            region_size = 2
+            while True:
+                # calculate centre points
+                centre_x = int((person.xywh[0] + person.xywh[2]/2) - region_size)
+                centre_y = int((person.xywh[1] + person.xywh[3]/2) - region_size)
+                # extract xyz values along points of interest
+                centre_cluster = cloud[centre_y  : centre_y + region_size, centre_x : centre_x + region_size, 0:3]
+                not_nan_count = 0
+
+                for axes in centre_cluster:
+                    for point in axes:
+                        if not (np.isnan(point[0]) or np.isnan(point[1]) or np.isnan(point[2])):
+                            not_nan_count += 1
+
+                if not_nan_count >= 3:
+                    break
+                
+                region_size += 2
+
+            mean = np.nanmean(centre_cluster, axis=1)
+            mean = np.nanmean(mean, axis=0)
+            centre_point = PointStamped()
+            centre_point.header = depth_points.header
+            centre_point.point = Point(*mean)
+
+            person_point = transformer.transformPoint('map', centre_point)
+            print person_point
+            person_coords.append(person_point)
+        # -------------------------------------- #
+        # --- WE SHOULD GET RID OF THIS SOON --- #
+        # -------------------------------------- #
+
+
+
+        chairs = rospy.get_param('/chairs')
+        for chair in chairs:
+            max_x, max_y = chairs[chair]['box']['max_xy']
+            min_x, min_y = chairs[chair]['box']['min_xy']
+            rospy.set_param('/chairs/' + chair + '/status', 'free')
+            for person_point in person_coords:
+                point = person_point.point
+                if point.x > min_x and point.x < max_x and point.y > min_y and point.y < max_y:
+                    rospy.set_param('/chairs/' + chair + '/status', 'taken')
+
+
+        frame = bridge.imgmsg_to_cv2(detection_result.image_bb, "bgr8")
+        cv2.imshow('frame', frame)
+        cv2.waitKey(0)
+
+        return 'outcome1'
+
+
+
+
+
 
 
 
@@ -421,10 +564,13 @@ def main():
     sm = smach.StateMachine(outcomes=['outcome2'])
 
     with sm:
-        # smach.StateMachine.add('INIT', Init(), transitions={'outcome1':'WAITING'})
-        smach.StateMachine.add('INIT', Init(), transitions={'outcome1':'DETECTING'})
-        smach.StateMachine.add('WAITING', Waiting(), transitions={'outcome1':'DETECTING'})
-        smach.StateMachine.add('DETECTING', Detecting(), transitions={'outcome1':'WAITING'})
+        smach.StateMachine.add('INIT', Init(), transitions={'outcome1':'WAIT_NEW'})
+        smach.StateMachine.add('WAIT_NEW', Waiting(), transitions={'outcome1':'DETECTING'})
+        smach.StateMachine.add('DETECTING', Detecting(), transitions={'outcome1':'WAIT_NEW', 'wait_leave':'INSPECT_ROOM'})
+        smach.StateMachine.add('WAIT_LEAVE', WaitLeave(), transitions={'outcome1':'INSPECT_ROOM'})
+        smach.StateMachine.add('INSPECT_ROOM', InspectRoom(), transitions={'outcome1':'DETECT_PEOPLE'})
+        smach.StateMachine.add('DETECT_PEOPLE', DetectPeople(), transitions={'outcome1':'WAIT_NEW'})
+
     
     outcome = sm.execute()
 
