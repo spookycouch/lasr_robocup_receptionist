@@ -1,30 +1,47 @@
-location:
+home:
   position: 
-    x: 0.374610889606
-    y: 2.64225894581
+    x: 2.0
+    y: 0.0
     z: 0.0
   orientation: 
     x: 0.0
     y: 0.0
-    z: 0.618607683167
-    w: 0.785700028209
+    z: 0.0
+    w: 1.0
+
+location:
+  position: 
+    x: 0.0
+    y: 0.0
+    z: 0.0
+  orientation: 
+    x: 0.0
+    y: 0.0
+    z: -1.0
+    w: 0.0
 
 chairs:
+  # middle
   chair0:
-    status: 'Unknown'
+    status: 'unknown'
     box:
       frame: 'map'
-      max_xy: [ -0.2, 7 ]
-      min_xy: [ -1, 6 ]
+      max_xy: [ -2, 0 ]
+      min_xy: [ -3,-1 ]
+    neighbours: [chair1, chair2]
+  # right
   chair1:
-    status: 'Uknown'
+    status: 'unknown'
     box:
       frame: 'map'
-      max_xy: [ 0.6, 7 ]
-      min_xy: [ -0.2, 6 ]
+      max_xy: [ -2,-1 ]
+      min_xy: [ -3,-2 ]
+    neighbours: [chair0]
+  # left
   chair2:
-    status: 'Uknown'
+    status: 'unknown'
     box:
       frame: 'map'
-      max_xy: [ 2, 5.6 ]
-      min_xy: [ 1, 4.9 ]
+      max_xy: [ -2, 1.5 ]
+      min_xy: [ -3, 0 ]
+    neighbours: [chair0]
