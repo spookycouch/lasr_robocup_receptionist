@@ -9,5 +9,8 @@
     <node pkg="lasr_object_detection_yolo" type="object_detection_server.py" name="yolo_detection" args="" output="screen" />
     <node pkg="robocup_receptionist" type="smach_test.py" name="smach_test" args="" output="screen" />
 
+    <include file="$(find lasr_speech)/launch/lasr_speech.launch"/>
+
+
 
 </launch>

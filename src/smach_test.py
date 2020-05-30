@@ -5,6 +5,7 @@ import rospy
 import cv2
 import actionlib
 from math import sqrt, atan2
+from threading import Thread
 from cv_bridge import CvBridge, CvBridgeError
 from operator import itemgetter
 
@@ -12,6 +13,8 @@ from vision import identify_person, wait_for_person
 from euclidian_tracking import vector_euclidian_distance, EuclidianTracker
 
 import numpy as np
+import subprocess
+
 from sensor_msgs.msg import Image, PointCloud2
 from pal_interaction_msgs.msg import TtsAction, TtsGoal
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
@@ -19,6 +22,7 @@ from control_msgs.msg import PointHeadAction, PointHeadGoal
 from std_msgs.msg import Header
 from geometry_msgs.msg import Point, Pose, Quaternion, PointStamped, Vector3, PoseWithCovarianceStamped
 from lasr_object_detection_yolo.srv import YoloDetection
+from lasr_speech.msg import informationAction, informationGoal
 import tf
 
 from face_detector_tracker import FaceRecogniser
@@ -67,15 +71,19 @@ world = GlobalState()
 
 
 
-def talk(text):
-    # Create the TTS goal and send it
-    speech_client = actionlib.SimpleActionClient('/tts', TtsAction)
+def talk(text, wait=False):
     print('\033[1;36mTIAGO: ' + text + '\033[0m')
-    tts_goal = TtsGoal()
-    tts_goal.rawtext.lang_id = 'en_GB'
-    tts_goal.rawtext.text = text
-    rospy.sleep(0.3) # prevent race conditions
-    speech_client.send_goal(tts_goal)
+    tts_proc = subprocess.Popen(['echo "{}" | festival --tts'.format(text)], shell=True)
+    # Create the TTS goal and send it
+    # speech_client = actionlib.SimpleActionClient('/tts', TtsAction)
+    # tts_goal = TtsGoal()
+    # tts_goal.rawtext.lang_id = 'en_GB'
+    # tts_goal.rawtext.text = text
+    # rospy.sleep(0.3) # prevent race conditions
+    # speech_client.send_goal(tts_goal)
+    if wait == True:
+        tts_proc.wait()
+
 
 
 def get_angle_between_points(source_x, source_y, target_x, target_y):
@@ -108,31 +116,75 @@ class Waiting(smach.State):
         return 'outcome1'
 
 
+def small_talk_runnable():
+    rospy.sleep(1)
+    talk('my sensors tell me we have lovely weather today', wait=True)
+
+def speech_runnable(result_dict):
+    speech_client = actionlib.SimpleActionClient('receptionist', informationAction)
+    speech_client.wait_for_server()
+    talk('may i please get your name?', wait=True)
+
+    result_dict['name'] = ''
+    while result_dict['name'] == '':
+        goal = informationGoal('name', 'receptionist_name')
+        speech_client.send_goal(goal)
+        speech_client.wait_for_result()
+        result_dict['name'] = speech_client.get_result().data
+
+    talk("Your name is " + result_dict['name'], wait=True)
+    talk('may i please get your favourite drink?', wait=True)
+
+    result_dict['drink'] = ''
+    while result_dict['drink'] == '':
+        goal = informationGoal('drink', 'receptionist_drink')
+        speech_client.send_goal(goal)
+        speech_client.wait_for_result()
+        result_dict['drink'] = speech_client.get_result().data
+    
+    talk("Your favourite drink is " + result_dict['drink'], wait=True)
+
 # identify features of said someone
 class Detecting(smach.State):
     def __init__(self):
         smach.State.__init__(self,outcomes=['outcome1','wait_leave'])
 
     def execute(self, userdata):
-        talk('Hi there, may I please look into your eyes?')
+        talk('Hi there, may I please look into your eyes?', wait=True)
+        
+        # make some small talk
+        small_talk_thread = Thread(target=small_talk_runnable)
+        small_talk_thread.start()
+
         result = identify_person(world.tracker, world.tracked_id, world.face_recogniser)
         success, recognised, person_id, top_colour_out, hair_colour_out, age_out, gender_out = result
 
         if not success:
             return 'outcome1'
 
+        # end the small talk
+        small_talk_thread.join()
+
         if recognised:
             person = world.persons[person_id]
             talk('Welcome back {}, I like your {} top!'.format(person.name, person.top_colour))
         else:
-            name_out = np.random.choice(world.NAMES_M)
+            # talk('It appears I haven\'t met you before, I shall call you {}'.format(person.name))
+            talk('It appears I haven\'t met you before.', wait=True)
+            result_dict = {}
+            speech_runnable(result_dict)
+
+            # name_out = np.random.choice(world.NAMES_M)
+            name_out = result_dict['name']
+            drink_out = result_dict['drink']
             person = Person(person_id, name_out, top_colour_out, hair_colour_out, age_out, gender_out)
             world.persons.append(person)
-            talk('It appears I haven\'t met you before, I shall call you {}'.format(person.name))
         
         world.curr_person_id = person.id
         print person
         print len(world.persons)
+
+        talk('Alright {}, please follow me'.format(person.name))
         return 'wait_leave'
 
 
