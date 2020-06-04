@@ -19,6 +19,7 @@ from sensor_msgs.msg import Image, PointCloud2
 from pal_interaction_msgs.msg import TtsAction, TtsGoal
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from control_msgs.msg import PointHeadAction, PointHeadGoal
+from play_motion_msgs.msg import PlayMotionAction, PlayMotionGoal
 from std_msgs.msg import Header
 from geometry_msgs.msg import Point, Pose, Quaternion, PointStamped, Vector3, PoseWithCovarianceStamped
 from lasr_object_detection_yolo.srv import YoloDetection
@@ -27,13 +28,12 @@ import tf
 
 from face_detector_tracker import FaceRecogniser
 
-
+#TODO: face chairs when speaking to people
+#TODO: face straight when done looking at things
 
 class GlobalState:
     def __init__(self):
         self.persons = []
-        self.NAMES_M = ['bobbert','michael','steve']
-        self.NAMES_F = ['sally','christine','jenny']
         self.tracker = EuclidianTracker()
         self.tracked_id = 0
         self.next_person_id = 0
@@ -44,9 +44,10 @@ class GlobalState:
 
 
 class Person:
-    def __init__(self, id, name, top_colour, hair_colour, age, gender):
+    def __init__(self, id, name, drink, top_colour, hair_colour, age, gender):
         self.id = id
         self.name = name
+        self.drink = drink
         self.top_colour = top_colour
         self.hair_colour = hair_colour
         self.age = age
@@ -55,11 +56,13 @@ class Person:
     def __str__(self):
         return 'PERSON {}: \
             \n\tname       : {}\
+            \n\tdrink      : {}\
             \n\ttop colour : {}\
             \n\thair colour: {}\
             \n\tage        : {}\
             \n\tgender     : {}'.format(self.id,        \
                                     self.name,          \
+                                    self.drink,         \
                                     self.top_colour,    \
                                     self.hair_colour,   \
                                     self.age,           \
@@ -95,6 +98,38 @@ def get_angle_between_points(source_x, source_y, target_x, target_y):
 def get_centre_point(x1, y1, x2, y2):
     return (x1 + x2)/2, (y1 + y2)/2
 
+def tiago_point_head(x, y, wait=False):
+    point_head_client = actionlib.SimpleActionClient('/head_controller/point_head_action', PointHeadAction)
+    point_head_client.wait_for_server()
+    chair_point = Point(x, y, 1)
+    
+    # create head goal
+    ph_goal = PointHeadGoal()
+    ph_goal.target.header.frame_id = 'map'
+    ph_goal.max_velocity = 1
+    ph_goal.min_duration = rospy.Duration(0.5)
+    ph_goal.target.header.stamp = rospy.Time(0)
+    ph_goal.target.point = chair_point
+    ph_goal.pointing_frame = 'head_2_link'
+    ph_goal.pointing_axis = Vector3(1,0,0)
+
+    point_head_client.send_goal(ph_goal)
+    if wait:
+        point_head_client.wait_for_result()
+
+def tiago_head_default(wait=False):
+    # move head back to default
+    play_motion_client = actionlib.SimpleActionClient('/play_motion', PlayMotionAction)
+    play_motion_client.wait_for_server()
+    pm_goal = PlayMotionGoal('back_to_default', True, 0)
+    test_goal = PlayMotionGoal()
+    print test_goal.priority
+    play_motion_client.send_goal(pm_goal)
+    rospy.loginfo('play motion: back to default')
+
+    if wait:
+        play_motion_client.wait_for_result()
+
 
 # create all of the clients
 class Init(smach.State):
@@ -102,6 +137,7 @@ class Init(smach.State):
         smach.State.__init__(self,outcomes=['outcome1'])
 
     def execute(self, userdata):
+        tiago_head_default(wait=True)
         return 'outcome1'
 
 
@@ -117,32 +153,47 @@ class Waiting(smach.State):
 
 
 def small_talk_runnable():
-    rospy.sleep(1)
-    talk('my sensors tell me we have lovely weather today', wait=True)
+    talk('i am currently remembering the features of your face', wait=True)
+    talk('when speaking, a bell will ring to indicate that i am listening', wait=True)
+
 
 def speech_runnable(result_dict):
     speech_client = actionlib.SimpleActionClient('receptionist', informationAction)
     speech_client.wait_for_server()
-    talk('may i please get your name?', wait=True)
 
-    result_dict['name'] = ''
-    while result_dict['name'] == '':
-        goal = informationGoal('name', 'receptionist_name')
+    talk('may i please get your name?', wait=True)
+    goal = informationGoal('name', 'receptionist_name')
+    tries = 0
+
+    while tries < 3:
         speech_client.send_goal(goal)
         speech_client.wait_for_result()
         result_dict['name'] = speech_client.get_result().data
 
-    talk("Your name is " + result_dict['name'], wait=True)
-    talk('may i please get your favourite drink?', wait=True)
+        if not result_dict['name'] == '':
+            break
+        
+        talk('sorry, I didn\'t catch that, may i please get your name?', wait=True)
+        tries += 1
 
-    result_dict['drink'] = ''
-    while result_dict['drink'] == '':
-        goal = informationGoal('drink', 'receptionist_drink')
+    talk("ah, your name is " + result_dict['name'], wait=True)
+    talk('may i please get your favourite drink?', wait=True)
+    goal = informationGoal('drink', 'receptionist_drink')
+    tries = 0
+
+    while tries < 3:
         speech_client.send_goal(goal)
         speech_client.wait_for_result()
         result_dict['drink'] = speech_client.get_result().data
-    
-    talk("Your favourite drink is " + result_dict['drink'], wait=True)
+
+        if not result_dict['drink'] == '':
+            break
+        
+        talk('sorry, I didn\'t catch that, may i please get your favourite drink?', wait=True)
+        tries += 1
+
+    talk("and your favourite drink is " + result_dict['drink'], wait=True)
+
 
 # identify features of said someone
 class Detecting(smach.State):
@@ -150,7 +201,8 @@ class Detecting(smach.State):
         smach.State.__init__(self,outcomes=['outcome1','wait_leave'])
 
     def execute(self, userdata):
-        talk('Hi there, may I please look into your eyes?', wait=True)
+        talk('hello and welcome to the party, you must be a guest.', wait=True)
+        talk('may I please look into your eyes?', wait=True)
         
         # make some small talk
         small_talk_thread = Thread(target=small_talk_runnable)
@@ -167,17 +219,16 @@ class Detecting(smach.State):
 
         if recognised:
             person = world.persons[person_id]
-            talk('Welcome back {}, I like your {} top!'.format(person.name, person.top_colour))
+            talk('Welcome back {}, I like your {} top!'.format(person.name, person.top_colour), wait=True)
         else:
             # talk('It appears I haven\'t met you before, I shall call you {}'.format(person.name))
             talk('It appears I haven\'t met you before.', wait=True)
             result_dict = {}
             speech_runnable(result_dict)
 
-            # name_out = np.random.choice(world.NAMES_M)
             name_out = result_dict['name']
             drink_out = result_dict['drink']
-            person = Person(person_id, name_out, top_colour_out, hair_colour_out, age_out, gender_out)
+            person = Person(person_id, name_out, drink_out, top_colour_out, hair_colour_out, age_out, gender_out)
             world.persons.append(person)
         
         world.curr_person_id = person.id
@@ -267,14 +318,14 @@ class InspectRoom(smach.State):
 
 
 
-class DetectPeople(smach.State):
+class DetectSeated(smach.State):
     def __init__(self):
         smach.State.__init__(self,outcomes=['outcome1'])
 
     def execute(self, userdata):
-        # TODO: for chair in chairs, look at point then do detection
-        point_head_client = actionlib.SimpleActionClient('/head_controller/point_head_action', PointHeadAction)
         transformer = tf.TransformListener()
+        
+        talk('give me a moment, while i look for a free chair')
 
         chairs = rospy.get_param('/chairs')
         for chair in chairs:
@@ -282,21 +333,7 @@ class DetectPeople(smach.State):
             min_x, min_y = chairs[chair]['box']['min_xy']
             rospy.set_param('/chairs/' + chair + '/status', 'free')
 
-            point_head_client.wait_for_server()
-            chair_point = Point(max_x, max_y, 1)
-            
-            # create head goal
-            ph_goal = PointHeadGoal()
-            ph_goal.target.header.frame_id = 'map'
-            ph_goal.max_velocity = 1
-            ph_goal.min_duration = rospy.Duration(0.5)
-            ph_goal.target.header.stamp = rospy.Time(0)
-            ph_goal.target.point = chair_point
-            ph_goal.pointing_frame = 'head_2_link'
-            ph_goal.pointing_axis = Vector3(1,0,0)
-
-            point_head_client.send_goal(ph_goal)
-            point_head_client.wait_for_result()
+            tiago_point_head(max_x, max_y, wait=True)
             
             # wait for the service to come up
             image_raw = rospy.wait_for_message('/xtion/rgb/image_raw', Image)
@@ -371,6 +408,9 @@ class DetectPeople(smach.State):
             cv2.waitKey(3)
             cv2.waitKey(3)
 
+        # move head back to default
+        tiago_head_default()
+
         return 'outcome1'
 
 class GoToChair(smach.State):
@@ -384,6 +424,9 @@ class GoToChair(smach.State):
         chairs = rospy.get_param('/chairs')
         for chair in chairs:
             if chairs[chair]['status'] == 'free':
+
+                talk('follow me to your seat')
+
                 # get points and distances
                 amcl_msg = rospy.wait_for_message('/amcl_pose', PoseWithCovarianceStamped)
                 robot_point = amcl_msg.pose.pose.position
@@ -430,12 +473,14 @@ class GoToChair(smach.State):
                 if move_base_client.wait_for_result():
                     rospy.loginfo('Goal location achieved!')
 
+                    tiago_point_head(chair_x, chair_y, wait=True)
+
                     talk('please take a seat')
 
                     # check neighbours
                     for neighbour in chairs[chair]['neighbours']:
                         if chairs[neighbour]['status'] == 'taken':
-                            world.target_chair = neighbour
+                            world.target_chair = chair
                             return 'outcome2'
                 else:
                     rospy.logwarn("Couldn't reach the goal!")
@@ -451,16 +496,28 @@ class Introduce(smach.State):
 
     def execute(self, userdata):
         if world.target_chair is not None:
+            # get locations
+            chairs = rospy.get_param('/chairs')
+            amcl_msg = rospy.wait_for_message('/amcl_pose', PoseWithCovarianceStamped)
+            robot_point = amcl_msg.pose.pose.position
+            
+            # look for a taken neighbouring seat
+            target_neighbour = None
+
+            for neighbour in chairs[world.target_chair]['neighbours']:
+                if chairs[neighbour]['status'] == 'taken':
+                    target_neighbour = neighbour
+                    
+            if target_neighbour is None:
+                return 'outcome1'
+
+            # movement setup
             move_base_client = actionlib.SimpleActionClient('/move_base', MoveBaseAction)
             move_base_client.wait_for_server()
 
-            chairs = rospy.get_param('/chairs')
-
-            amcl_msg = rospy.wait_for_message('/amcl_pose', PoseWithCovarianceStamped)
-            robot_point = amcl_msg.pose.pose.position
-
-            chair_max_x, chair_max_y = chairs[world.target_chair]['box']['max_xy']
-            chair_min_x, chair_min_y = chairs[world.target_chair]['box']['min_xy']
+            # turn to the neighbour
+            chair_max_x, chair_max_y = chairs[target_neighbour]['box']['max_xy']
+            chair_min_x, chair_min_y = chairs[target_neighbour]['box']['min_xy']
             chair_x, chair_y = get_centre_point(chair_min_x, chair_min_y, chair_max_x, chair_max_y)
 
             target_angle = get_angle_between_points(robot_point.x, robot_point.y, chair_x, chair_y)
@@ -479,23 +536,64 @@ class Introduce(smach.State):
                 rospy.loginfo('Goal location achieved!')
             else:
                 rospy.logwarn("Couldn't reach the goal!")
+            
+            # look at the neighbour
+            tiago_point_head(chair_x, chair_y, wait=True)
+
+            # speak
+            talk('hey, i would like to introduce you to someone')
+
+
+            # turn back to the newly seated guest
+            chair_min_x, chair_min_y = chairs[world.target_chair]['box']['min_xy']
+            chair_max_x, chair_max_y = chairs[world.target_chair]['box']['max_xy']
+            chair_x, chair_y = get_centre_point(chair_min_x, chair_min_y, chair_max_x, chair_max_y)
+
+            target_angle = get_angle_between_points(robot_point.x, robot_point.y, chair_x, chair_y)
+            (x, y, z, w) = tf.transformations.quaternion_from_euler(0, 0, target_angle)
+            target_quaternion = Quaternion(x, y, z, w)
+            mb_goal.target_pose.pose.orientation = target_quaternion
+
+            move_base_client.send_goal(mb_goal)
+
+            if move_base_client.wait_for_result():
+                rospy.loginfo('Goal location achieved!')
+            else:
+                rospy.logwarn("Couldn't reach the goal!")
+
+            # look at the newly seated guest
+            tiago_point_head(chair_x, chair_y, wait=True)
 
             # try to identify the next seated person
+            found = False
             tries = 0
-            recognised = False
-            while not recognised and tries < 2: 
+            while tries < 2: 
                 world.tracked_id = wait_for_person(world.tracker, timeout=5)
                 if world.tracked_id is not None:
-                    result = identify_person(world.tracker, world.tracked_id, world.face_recogniser, add_mode=False)
+                    talk('give me a moment while I check that you are the right person')
+                    tries = 0
+                    while tries < 2:
+                        result = identify_person(world.tracker, world.tracked_id, world.face_recogniser, add_mode=False)
 
-                    if result[1]:
-                        person = world.persons[result[2]]
-                        talk('have you met {}'.format(person.name))
-                        return 'outcome1'
+                        if result[1]:
+                            person = world.persons[result[2]]
+                            talk('haaave you met {}. Their favourite drink is {}, and i really like their {} top'.format(person.name, person.drink, person.top_colour))
+                            return 'outcome1'
+                        
+                        found = result[0]
+                        tries += 1
+
+                        if found:
+                            talk('sorry but i do not recognise you, may i get a better look?', wait=True)
+                        else:
+                            talk('i do not see anybody. let me check again', wait=True)
                 
                 tries += 1
-            
-            talk('huh, looks like they left')
+
+            if found:
+                talk('unfortunately i cannot recognise this person')
+            else:
+                talk('huh, looks like they left')
 
         return 'outcome1'
 
@@ -505,6 +603,8 @@ class GoHome(smach.State):
         smach.State.__init__(self,outcomes=['outcome1'])
 
     def execute(self, userdata):
+        tiago_head_default()
+
         move_base_client = actionlib.SimpleActionClient('/move_base', MoveBaseAction)
         move_base_client.wait_for_server()
 
@@ -542,8 +642,8 @@ def main():
         # smach.StateMachine.add('DETECTING', Detecting(), transitions={'outcome1':'WAIT_NEW', 'wait_leave':'WAIT_NEW'})
         smach.StateMachine.add('DETECTING', Detecting(), transitions={'outcome1':'WAIT_NEW', 'wait_leave':'INSPECT_ROOM'})
         smach.StateMachine.add('WAIT_LEAVE', WaitLeave(), transitions={'outcome1':'INSPECT_ROOM'})
-        smach.StateMachine.add('INSPECT_ROOM', InspectRoom(), transitions={'outcome1':'DETECT_PEOPLE'})
-        smach.StateMachine.add('DETECT_PEOPLE', DetectPeople(), transitions={'outcome1':'GO_TO_CHAIR'})
+        smach.StateMachine.add('INSPECT_ROOM', InspectRoom(), transitions={'outcome1':'DETECT_SEATED'})
+        smach.StateMachine.add('DETECT_SEATED', DetectSeated(), transitions={'outcome1':'GO_TO_CHAIR'})
         smach.StateMachine.add('GO_TO_CHAIR', GoToChair(), transitions={'outcome1':'GO_HOME', 'outcome2':'INTRODUCE'})
         smach.StateMachine.add('INTRODUCE', Introduce(), transitions={'outcome1':'GO_HOME'})
 

@@ -1,0 +1,7 @@
+play_motion:
+  motions:
+    back_to_default:
+      joints: [head_1_joint, head_2_joint]
+      points:
+      - positions: [0.0, 0.0]
+        time_from_start: 2.0

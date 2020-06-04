@@ -1,6 +1,7 @@
 <launch>
     
     <rosparam command="load" file="$(find robocup_receptionist)/config/test.yaml" />
+    <rosparam command="load" file="$(find robocup_receptionist)/config/motions.yaml" />
 
     <node name="face_detection_server" pkg="robocup_face_recognition" type="face_detection_server.py" output="screen" respawn="true"></node>
     <node name="face_embedding_server" pkg="robocup_face_recognition" type="face_embedding_server.py" output="screen" respawn="true"></node>

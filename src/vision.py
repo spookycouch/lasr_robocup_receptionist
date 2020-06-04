@@ -73,7 +73,7 @@ def identify_person(tracker, tracked_id, face_recogniser, add_mode=True):
                 if detection.id == tracked_id:
                     detection_focus = detection
             if detection_focus is None:
-                return 0, None, None
+                return 0, None, None, None, None, None, None
 
             box = detection_focus.box
             box_w = box[2] - box[0]
@@ -269,7 +269,7 @@ def wait_for_person(tracker, timeout=None):
         
         # if a tracked person has been around for 10 seconds, transition
         max_time = 0
-        max_id = 0
+        max_id = None
         for tracked_object in tracker.tracked_objects:
             time_elapsed = rospy.Time.now().secs - tracked_object.time.secs
             if time_elapsed > max_time:
